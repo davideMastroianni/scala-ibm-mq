@@ -1,6 +1,7 @@
 package it.dmastro.queue
 
 import cats.effect.{ExitCode, IO, IOApp}
+import cats.implicits._
 import it.dmastro.queue.configuration.AppConfiguration
 import it.dmastro.queue.configuration.AppConfiguration.AppConfig
 import it.dmastro.queue.resources.Resources
@@ -23,8 +24,10 @@ object QueueApp extends IOApp {
   def app(appConfig: AppConfig): IO[Unit] =
     Resources.from(appConfig).use {
       case Resources(queueConsumer) =>
-        queueConsumer.handle {
-          case (msg, _) => logger.info(s"message --> ${msg.attemptAsText.get}").as(TransactionAction.commit[IO])
+        queueConsumer.parTraverse_ {
+          _.handle {
+            case (msg, _) => logger.info(s"message --> ${msg.attemptAsText.get}").as(TransactionAction.commit[IO])
+          }
         }
     }
 }
