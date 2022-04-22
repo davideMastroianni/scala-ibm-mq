@@ -4,10 +4,15 @@ import cats.effect.{ExitCode, IO, IOApp}
 import cats.implicits._
 import it.dmastro.queue.configuration.AppConfiguration
 import it.dmastro.queue.configuration.AppConfiguration.AppConfig
+import it.dmastro.queue.model.{NoOp, Result, Success}
 import it.dmastro.queue.resources.Resources
 import jms4s.JmsTransactedConsumer.TransactionAction
+import jms4s.jms.JmsMessage
+import org.mongodb.scala.Document
 import org.typelevel.log4cats.SelfAwareStructuredLogger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+
+import java.util.UUID
 
 object QueueApp extends IOApp {
 
@@ -23,10 +28,29 @@ object QueueApp extends IOApp {
 
   def app(appConfig: AppConfig): IO[Unit] =
     Resources.from(appConfig).use {
-      case Resources(queueConsumer) =>
+      case Resources(queueConsumer, inboundMessageStore) =>
+        def logic(message: JmsMessage): IO[Either[Throwable, Result]] = {
+          (for {
+            insert <- inboundMessageStore.insert(
+              Document(
+                "_id" -> UUID.randomUUID().toString,
+                "message" -> message.attemptAsText.get
+              ))
+          } yield Success(message, insert)).attempt
+        }
+
         queueConsumer.parTraverse_ {
           _.handle {
-            case (msg, _) => logger.info(s"message --> ${msg.attemptAsText.get}").as(TransactionAction.commit[IO])
+            case (msg, _) =>
+              for {
+                res <- logic(msg)
+                action <- res.fold(
+                  t => logger.error(t)("Rollbacking..." + msg.show).as(TransactionAction.rollback[IO]), {
+                    case s: Success => logger.info(s.show).as(TransactionAction.commit[IO])
+                    case n: NoOp    => logger.debug(n.show).as(TransactionAction.commit[IO])
+                  }
+                )
+              } yield action
           }
         }
     }
