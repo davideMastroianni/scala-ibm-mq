@@ -1,29 +1,35 @@
 package it.dmastro.queue.logic
 
 import cats.effect.IO
-import it.dmastro.queue.model.{Result, Success}
+import it.dmastro.queue.decoder.InboundMessageDecoder.InboundMessageDecoder
+import it.dmastro.queue.model.{InboundXmlMessage, Result, Success}
 import it.dmastro.queue.resources.mongo.MongoStore
 import jms4s.jms.JmsMessage
-import org.mongodb.scala.Document
+import org.mongodb.scala.bson.collection.immutable.Document
 
-import java.util.UUID
+class InboundMessageLogic private (mongoStore: MongoStore)
+    extends AbstractLogic {
 
-class InboundMessageLogic private (mongoStore: MongoStore) extends AbstractLogic {
-
-  override def describe(message: JmsMessage): IO[Either[Throwable, Result]] =
-    findMessage(message) match {
-      case Right()
-    }
-
-  def insertMessage(message: JmsMessage): IO[Either[Throwable, Result]] =
+  override def describe(message: JmsMessage): IO[Either[Throwable, Result]] = {
     (for {
-      insert <- mongoStore.insert(
-        Document(
-          "_id" -> "random_id",
-          "message" -> message.attemptAsText.get
-        ))
-    } yield Success(message, insert)).attempt
+      decodedMessage <- message.decode
+      maybeDocument <- mongoStore.findFirst(decodedMessage.toFindFilters)
+      upsertMessage <- upsertInboundMessage(decodedMessage, maybeDocument)
+    } yield Success(message, upsertMessage)).attempt
+  }
 
-  def findMessage(message: JmsMessage): IO[Either[Throwable, Result]] =
-    mongoStore.find("random_id").map(_ => Success(message, _)).attempt
+  private def upsertInboundMessage(
+      decodedMessage: InboundXmlMessage,
+      maybeDocument: Option[Document]
+  ): IO[Document] =
+    if (maybeDocument.isEmpty)
+      mongoStore.insert(decodedMessage.toMongoDocument)
+    else
+      mongoStore.updateOne(decodedMessage.toUpdateOneModel)
+
+}
+
+object InboundMessageLogic {
+  def make(mongoStore: MongoStore): InboundMessageLogic =
+    new InboundMessageLogic(mongoStore);
 }
